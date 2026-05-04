@@ -34,4 +34,4 @@ class BenchTest:
                 backend_generator=lambda _: StatevectorBackend(),
                 backend_name="statevector_template",
             )
-            runner.run()  # type: ignore[no-untyped-call]  graphix-mqtbench is not annotated.
+            runner.run()  # type: ignore[no-untyped-call] # graphix-mqtbench is not annotated.

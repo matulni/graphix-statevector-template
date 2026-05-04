@@ -250,9 +250,7 @@ def test_pattern_simulator(fx_bg: PCG64, jumps: int) -> None:
     pattern.perform_pauli_measurements()
     pattern.infer_pauli_measurements()
 
-    sv_test = pattern.simulate_pattern(
-        backend=StatevectorBackend(), rng=rng
-    )
+    sv_test = pattern.simulate_pattern(backend=StatevectorBackend(), rng=rng)
     sv_ref = pattern.simulate_pattern(backend=SBLegacy(), rng=rng)
 
     assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
