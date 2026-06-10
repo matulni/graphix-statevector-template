@@ -13,11 +13,16 @@ from graphix.sim.statevec import StatevectorBackend as SBLegacy
 from graphix.states import BasicStates
 from numpy.random import Generator
 
-from graphix_statevec_template import Statevec, StatevectorBackend
+from graphix_statevec_cuquantum import Statevec, StatevectorBackend
+from graphix_statevec_cuquantum.graphix_statevec_cuquantum import _gpu_available
 
 if TYPE_CHECKING:
     from graphix.states import State
     from numpy.random import PCG64
+
+# The backend requires a CUDA device. On CI runners (which have no GPU) the whole module is skipped;
+# the maintainers run these tests offline on a GPU.
+pytestmark = pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 
 
 def generate_rnd_data(rng: Generator, nqubits: int) -> npt.NDArray[np.complex128]:
@@ -27,7 +32,6 @@ def generate_rnd_data(rng: Generator, nqubits: int) -> npt.NDArray[np.complex128
     return data
 
 
-@pytest.mark.skip(reason="Not Implemented")
 class TestStatevec:
     N_JUMPS = 3
 
@@ -51,6 +55,18 @@ class TestStatevec:
         data = generate_rnd_data(fx_rng, nqubit)
         sv = Statevec(data)
         assert np.allclose(sv.flatten(), data)
+
+    def test_init_max_space(self, fx_rng: Generator) -> None:
+        data = generate_rnd_data(fx_rng, 3)
+        sv = Statevec(data, max_space=6)
+        assert sv.nqubit == 3
+        assert sv.max_space == 6
+        assert sv.psi.size == 1 << 6
+        assert np.allclose(sv.flatten(), data)
+
+    def test_init_max_space_too_small(self) -> None:
+        with pytest.raises(ValueError, match="max_space"):
+            Statevec(nqubit=3, max_space=2)
 
     @pytest.mark.parametrize(
         ("sv", "edge", "data_ref"),
@@ -134,6 +150,15 @@ class TestStatevec:
             sv_test.add_nodes(1, data)
             assert np.allclose(sv_test.flatten(), psi_ref)
 
+    def test_add_nodes_plus(self) -> None:
+        # Exercises the specialized single-|+> path used when processing N commands.
+        max_qubits = 5
+        sv_test = Statevec(nqubit=0)
+        for _ in range(max_qubits):
+            sv_test.add_nodes(1, BasicStates.PLUS)
+        sv_ref = Statevec(data=[BasicStates.PLUS] * max_qubits)
+        assert np.allclose(sv_test.flatten(), sv_ref.flatten())
+
     @pytest.mark.parametrize(
         ("sv", "q", "sv_ref"),
         [
@@ -141,7 +166,6 @@ class TestStatevec:
             (Statevec(data=[BasicStates.PLUS, BasicStates.PLUS]), 1, Statevec(data=BasicStates.PLUS, nqubit=1)),
             (Statevec(data=[BasicStates.PLUS, BasicStates.MINUS]), 0, Statevec(data=BasicStates.MINUS, nqubit=1)),
             (Statevec(data=[BasicStates.ZERO, BasicStates.ONE]), 0, Statevec(data=BasicStates.ONE, nqubit=1)),
-            # In previous testcase, branch 1 is 0 (psi_10 == psi_11 == 0), and first element of branch 0 is 0 too (psi_00 == 0)!
             (
                 Statevec(data=[BasicStates.PLUS_I, BasicStates.ONE, BasicStates.PLUS]),
                 1,
@@ -154,7 +178,6 @@ class TestStatevec:
         assert np.allclose(sv.flatten(), sv_ref.flatten())
 
 
-@pytest.mark.skip(reason="Not Implemented")
 class TestStatevecLegacy:
     """Tests in this class compare the result against the existing statevector simulator in Graphix. They are not self-contained."""
 
@@ -167,9 +190,8 @@ class TestStatevecLegacy:
         sv_test = Statevec(generate_rnd_data(rng, nqubits))
         sv_ref = SVLegacy(data=sv_test.flatten())
         edge: tuple[int, int] = tuple(rng.choice(range(nqubits), size=2, replace=False))
-        for sv in [sv_test, sv_ref]:
-            sv.entangle(edge)
-
+        sv_test.entangle(edge)
+        sv_ref.entangle(edge)
         assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
     @pytest.mark.parametrize("jumps", range(1, N_JUMPS))
@@ -179,9 +201,8 @@ class TestStatevecLegacy:
         sv_test = Statevec(generate_rnd_data(rng, nqubits))
         sv_ref = SVLegacy(data=sv_test.flatten())
         edge: tuple[int, int] = tuple(rng.choice(range(nqubits), size=2, replace=False))
-        for sv in [sv_test, sv_ref]:
-            sv.swap(edge)
-
+        sv_test.swap(edge)
+        sv_ref.swap(edge)
         assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
     def test_evolve_single(self, fx_rng: Generator) -> None:
@@ -190,8 +211,8 @@ class TestStatevecLegacy:
             sv_test = Statevec(generate_rnd_data(fx_rng, nqubits))
             sv_ref = SVLegacy(data=sv_test.flatten())
             qubit = int(fx_rng.integers(0, nqubits))
-            for sv in [sv_test, sv_ref]:
-                sv.evolve_single(clifford.matrix, qubit)
+            sv_test.evolve_single(clifford.matrix, qubit)
+            sv_ref.evolve_single(clifford.matrix, qubit)
             assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
     def test_expectation_single(self, fx_rng: Generator) -> None:
@@ -208,7 +229,6 @@ class TestStatevecLegacy:
             assert math.isclose(val_test.imag, val_ref.imag, abs_tol=1e-12)
 
     def test_add_nodes(self, fx_rng: Generator) -> None:
-
         max_qubits = 5
         sv_test = Statevec(nqubit=0)
         sv_ref = SVLegacy(nqubit=0)
@@ -224,7 +244,6 @@ class TestStatevecLegacy:
         "projector", [np.array([[1, 0], [0, 0]], dtype=np.complex128), np.array([[0, 0], [0, 1]], dtype=np.complex128)]
     )
     def test_remove_nodes(self, fx_rng: Generator, projector: npt.NDArray[np.complex128]) -> None:
-
         nqubits = 5
         sv_test = Statevec(generate_rnd_data(fx_rng, nqubits))
         sv_ref = SVLegacy(data=sv_test.flatten())
@@ -238,36 +257,34 @@ class TestStatevecLegacy:
             assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
 
-@pytest.mark.skip(reason="Not Implemented")
 @pytest.mark.parametrize("jumps", range(1, 6))
 def test_pattern_simulator(fx_bg: PCG64, jumps: int) -> None:
-    rng = Generator(fx_bg.jumped(jumps))
+    rng_test = Generator(fx_bg.jumped(jumps))
+    rng_ref = Generator(fx_bg.jumped(jumps))
 
     nqubits = 5
 
-    pattern = rand_circuit(nqubits, depth=5, rng=rng).transpile().pattern
+    pattern = rand_circuit(nqubits, depth=5, rng=Generator(fx_bg.jumped(jumps))).transpile().pattern
     pattern.remove_pauli_measurements()
 
-    sv_test = pattern.simulate_pattern(backend=StatevectorBackend(), rng=rng)
-    sv_ref = pattern.simulate_pattern(backend=SBLegacy(), rng=rng)
+    sv_test = pattern.simulate_pattern(backend=StatevectorBackend(), rng=rng_test)
+    sv_ref = pattern.simulate_pattern(backend=SBLegacy(), rng=rng_ref)
 
     assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
 
-# # @pytest.mark.skip(reason="debug")
-# @pytest.mark.parametrize("test_case", generate_benchmark_list(nqubits=2))
-# @pytest.mark.benchmark(max_time=0.01, min_rounds=1, warmup=False)
-# def test_mqtbench_simulation(test_case: Benchmark, benchmark: BenchmarkFixture) -> None:
-#     sv_ref = test_case.to_circuit().simulate_statevector().statevec
+@pytest.mark.parametrize("jumps", range(1, 4))
+def test_pattern_simulator_with_capacity(fx_bg: PCG64, jumps: int) -> None:
+    # The `with_capacity` constructor preallocates the buffer to the pattern's maximum space.
+    rng_test = Generator(fx_bg.jumped(jumps))
+    rng_ref = Generator(fx_bg.jumped(jumps))
 
-#     optim_pass = OptimizationPass.M
-#     runner = BenchmarkRunner(
-#         benchmark=test_case,
-#         benchmark_fixture=benchmark,
-#         optim=optim_pass,
-#         backend_generator=lambda p: StatevectorBackend(state=Statevec(nqubit=0, max_space=p.max_space())),
-#         backend_name="test",
-#     )
-#     sv = runner.run()  # type: ignore[no-untyped-call] # TODO: annotate graphix-mqtbenchs
+    nqubits = 5
+    pattern = rand_circuit(nqubits, depth=5, rng=Generator(fx_bg.jumped(jumps))).transpile().pattern
+    pattern.remove_pauli_measurements()
 
-#     assert sv_ref.isclose(sv)
+    backend = StatevectorBackend.with_capacity(pattern.max_space())
+    sv_test = pattern.simulate_pattern(backend=backend, rng=rng_test)
+    sv_ref = pattern.simulate_pattern(backend=SBLegacy(), rng=rng_ref)
+
+    assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
