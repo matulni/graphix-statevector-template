@@ -1,10 +1,10 @@
 [project]
-name = "graphix-statevec-template"
+name = "graphix-statevec-cuquantum"
 version = "0.1.0"
-description = "Template for Graphix statevector backend"
+description = "GPU-accelerated Graphix state vector backend built on NVIDIA cuQuantum (cuStateVec)"
 readme = "README.md"
 authors = [
-    { name = "matulni", email = "mateo.uldemolins-nivela@inria.fr" }
+    { name = "GrovyleX" }
 ]
 requires-python = ">=3.13"
 dependencies = [
@@ -30,10 +30,11 @@ dev = [
 graphix-mqtbench = { git = "https://github.com/matulni/graphix-mqtbench.git", rev = "main" }
 graphix = { git = "https://github.com/TeamGraphix/graphix.git", rev = "master" }
 
-[project.scripts]
-graphix-statevec-template = "graphix_statevec_template:main"
-
 [project.optional-dependencies]
+cuquantum = [
+    "cupy-cuda12x>=13",
+    "cuquantum-python-cu12>=26",
+]
 typing = [
     "qiskit==2.3.1",
 ]
@@ -128,6 +129,12 @@ follow_imports = "silent"
 follow_untyped_imports = true # required for qiskit, requires mypy >=1.14
 strict = true
 mypy_path = "./stubs"
+
+# `cupy` and `cuquantum` ship incomplete type information; treat them as untyped (``Any``).
+[[tool.mypy.overrides]]
+module = ["cupy", "cupy.*", "cuquantum", "cuquantum.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
 
 [tool.pyright]
 # Keep in sync with mypy
