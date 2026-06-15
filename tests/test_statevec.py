@@ -13,7 +13,7 @@ from graphix.sim.statevec import StatevectorBackend as SBLegacy
 from graphix.states import BasicStates
 from numpy.random import Generator
 
-from graphix_statevec_template import Statevec, StatevectorBackend
+from graphix_statevec_template import Statevec, StatevectorBackend, _gpu_available
 
 if TYPE_CHECKING:
     from graphix.states import State
@@ -27,7 +27,7 @@ def generate_rnd_data(rng: Generator, nqubits: int) -> npt.NDArray[np.complex128
     return data
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 class TestStatevec:
     N_JUMPS = 3
 
@@ -154,7 +154,7 @@ class TestStatevec:
         assert np.allclose(sv.flatten(), sv_ref.flatten())
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 class TestStatevecLegacy:
     """Tests in this class compare the result against the existing statevector simulator in Graphix. They are not self-contained."""
 
@@ -238,7 +238,7 @@ class TestStatevecLegacy:
             assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 @pytest.mark.parametrize("jumps", range(1, 6))
 def test_pattern_simulator(fx_bg: PCG64, jumps: int) -> None:
     rng = Generator(fx_bg.jumped(jumps))

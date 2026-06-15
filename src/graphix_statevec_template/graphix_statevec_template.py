@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
+import numpy as np
+import numpy.typing as npt
 from graphix.sim.base_backend import DenseState, DenseStateBackend, Matrix
 from graphix.sim.statevec import Statevec as SVLegacy
 from graphix.states import BasicStates
@@ -15,222 +18,311 @@ if TYPE_CHECKING:
 
     from graphix.sim.data import Data
 
+try:
+    import cupy as cp  # type: ignore[import-not-found]
+
+    cp.cuda.Device(0).compute_capability  # noqa: B018
+    _GPU: bool = True
+except Exception:  # noqa: BLE001
+    import numpy as cp  # noqa: ICN001
+
+    _GPU = False
+
+
+def _gpu_available() -> bool:
+    """Return True if CuPy and a CUDA GPU are available.
+
+    Returns
+    -------
+    bool
+        True when the GPU backend is active.
+    """
+    return _GPU
+
+
+# Module-level gate constants (numpy; converted to cp at use-time via cp.asarray)
+_CZ = np.array(
+    [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, -1]],
+    dtype=np.complex128,
+)
+_SWAP = np.array(
+    [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+    dtype=np.complex128,
+)
+
 
 class Statevec(DenseState):
-    """Statevector object.
+    """GPU-accelerated statevector with a flat pre-allocated buffer.
+
+    The quantum state is stored as a flat complex128 array of length
+    ``2**max_space``. Only the first ``2**_nqubit`` elements are active;
+    the rest is zero-padded capacity reserve so that :meth:`tensor` and
+    :meth:`add_nodes` avoid reallocation on every call.
+
+    All gate operations use :func:`cp.tensordot` on the reshaped active region,
+    preserving graphix's qubit convention (qubit ``i`` = axis ``i``).
 
     Attributes
     ----------
-    psi : numpy.ndarray of numpy.complex128
-        Complex-valued 1-dimensional array representing the quantum statevector.
-        Throughout the simulation ``psi`` has constant size ``2**max_space``. Only the first ``2**nqubit`` complex values have meaning.
-
+    psi : array-like of complex128
+        Flat buffer of length ``2**max_space``.
+        Active region: ``psi[:2**_nqubit]``.
     max_space : int
-        Maximum Hilbert space size allowed for internal computations. It determines the size of ``psi``. For circuit simulations, it corresponds to the number of qubits, while for pattern simulations it corresponds to the pattern's maximum space.
-
+        Allocated capacity in qubits. ``len(psi) == 2**max_space``.
     _nqubit : int
-        Number of active qubits at any given time.
+        Number of active qubits.
     """
 
-    psi: Matrix  # TODO: Update type annotation appropiately.
+    psi: Any  # cp.ndarray when GPU available, np.ndarray otherwise
 
-    def __init__(self, data: Data = BasicStates.PLUS, nqubit: int | None = None) -> None:
-        """Initialize statevector objects.
+    def __init__(
+        self,
+        data: Data = BasicStates.PLUS,
+        nqubit: int | None = None,
+        max_space: int | None = None,
+    ) -> None:
+        """Initialise statevector.
 
-        See :class:`graphix.sim.statevec.Statevec` for additional information.
+        Delegates state construction to :class:`graphix.sim.statevec.Statevec`
+        then copies the result into a GPU (or CPU fallback) flat buffer.
 
         Parameters
         ----------
         data : Data, optional
-            Input data to prepare the state. Can be a classical description or a numerical input, defaults to `graphix.states.BasicStates.PLUS`
+            Input state. Accepts a :class:`graphix.states.State`, a list of
+            states, or a flat complex128 array. Defaults to
+            ``BasicStates.PLUS``.
         nqubit : int | None, optional
-            Number of qubits to prepare. If ``None`` (default), it's inferred from ``data``.
+            Number of qubits. Inferred from ``data`` when ``None``.
+        max_space : int | None, optional
+            Pre-allocated buffer capacity in qubits. Defaults to ``nqubit``.
         """
-        sv_graphix = SVLegacy(data, nqubit)  # noqa: F841
+        sv_legacy = SVLegacy(data, nqubit)
+        self._nqubit: int = sv_legacy.nqubit
+        flat = sv_legacy.flatten().astype(np.complex128)
 
-        # TODO
-        # For simplicity, the __init__ method in this template re-uses the constructor of the existing statevector in Graphix.
-        # This method should convert `sv_graphix` to the appropriate internal representation of the new backend.
+        self.max_space: int = max(max_space if max_space is not None else self._nqubit, self._nqubit)
+
+        buf = cp.zeros(1 << self.max_space, dtype=cp.complex128)
+        buf[: len(flat)] = cp.asarray(flat)
+        self.psi = buf
 
     def __str__(self) -> str:
         """Return a string description."""
-        sv = self.psi
-        return f"Statevec object with statevector {sv} and length {len(sv)}."
+        active = self.psi[: 1 << self._nqubit]
+        return f"Statevec object with statevector {active} and length {1 << self._nqubit}."
 
-    # Note that `@property` must appear before `@override` for pyright
+    # ── private helpers ───────────────────────────────────────────────────
+
+    def _ensure_capacity(self, needed: int) -> None:
+        """Reallocate buffer when ``needed`` qubits exceed current capacity.
+
+        Parameters
+        ----------
+        needed : int
+            Required number of qubits after the next operation.
+        """
+        if needed <= self.max_space:
+            return
+        new_max = max(self.max_space + 1, needed)
+        new_buf = cp.zeros(1 << new_max, dtype=cp.complex128)
+        new_buf[: 1 << self._nqubit] = self.psi[: 1 << self._nqubit]
+        self.psi = new_buf
+        self.max_space = new_max
+
+    def _apply_gate(
+        self,
+        gate_np: npt.NDArray[np.complex128],
+        qargs: tuple[int, ...],
+    ) -> None:
+        """Apply a gate to the specified qubits via tensordot.
+
+        Parameters
+        ----------
+        gate_np : np.ndarray
+            Gate matrix of shape ``(2**k, 2**k)`` for a k-qubit gate.
+        qargs : tuple of int
+            Target qubit indices, matching graphix axis ordering.
+        """
+        n = self._nqubit
+        k = len(qargs)
+        gate = cp.asarray(gate_np).reshape([2] * (2 * k))
+        psi_t = self.psi[: 1 << n].reshape([2] * n)
+
+        contracted = cp.tensordot(
+            gate,
+            psi_t,
+            axes=(list(range(k, 2 * k)), list(qargs)),
+        )
+        self.psi[: 1 << n] = cp.moveaxis(contracted, list(range(k)), list(qargs)).ravel()
+
+    # ── DenseState interface ──────────────────────────────────────────────
+
     @property
     @override
     def nqubit(self) -> int:
-        """Return the number of qubits."""
-        # TODO
-        raise NotImplementedError
+        """Return the number of active qubits."""
+        return self._nqubit
 
     @override
     def flatten(self) -> Matrix:
-        """Return flattened state.
+        """Return the active state as a flat numpy array.
 
-        A view of only the first ``2**self.nqubit`` elements of ``self.psi`` is returned.
+        Returns
+        -------
+        np.ndarray
+            Complex128 array of length ``2**nqubit``.
         """
-        # TODO
-        raise NotImplementedError
+        active = self.psi[: 1 << self._nqubit]
+        if _GPU:
+            return np.asarray(active.get(), dtype=np.complex128)
+        return np.asarray(active, dtype=np.complex128)
+
+    def tensor(self, other: Statevec) -> None:
+        r"""In-place tensor product ``self ⊗ other``.
+
+        Parameters
+        ----------
+        other : Statevec
+            Statevector to tensor with.
+        """
+        new_n = self._nqubit + other._nqubit
+        self._ensure_capacity(new_n)
+        result = cp.kron(
+            self.psi[: 1 << self._nqubit],
+            other.psi[: 1 << other._nqubit],
+        )
+        self.psi[: 1 << new_n] = result
+        self._nqubit = new_n
 
     @override
     def add_nodes(self, nqubit: int, data: Data) -> None:
-        r"""Add nodes (qubits) to the state vector and initialize them in a specified state.
+        r"""Add qubits initialised in ``data`` via tensor product.
 
         Parameters
         ----------
         nqubit : int
-            The number of qubits to add to the state vector.
-
-        data : Data, optional
-            The state in which to initialize the newly added nodes.
-
-            - If a single basic state is provided, all new nodes are initialized in that state.
-            - If a list of basic states is provided, it must match the length of ``nodes``, and
-              each node is initialized with its corresponding state.
-            - A single-qubit state vector will be broadcast to all nodes.
-            - A multi-qubit state vector of dimension :math:`2^n`, where :math:`n = \mathrm{len}(nodes)`, initializes the new nodes jointly.
-
-        Notes
-        -----
-        Previously existing nodes remain unchanged.
+            Number of qubits to add.
+        data : Data
+            Initial state for the new qubits.
         """
-        sv_to_add = Statevec(nqubit=nqubit, data=data)
-        self.tensor(sv_to_add)
+        self.tensor(Statevec(nqubit=nqubit, data=data))
 
     @override
     def entangle(self, edge: tuple[int, int]) -> None:
-        """Connect graph nodes.
+        """Apply a CZ gate between two qubits.
 
         Parameters
         ----------
         edge : tuple of int
-            (control, target) qubit indices
+            ``(control, target)`` qubit indices.
         """
-        # TODO
-        raise NotImplementedError
-
-    @override
-    def evolve(self, op: Matrix, qargs: Sequence[int]) -> None:
-        """Apply a multi-qubit operation.
-
-        Parameters
-        ----------
-        op : numpy.ndarray
-            2^n*2^n matrix
-        qargs : list of int
-            target qubits' indices
-        """
-        # This method is not required for the pattern simulator,
-        # only by the circuit simulator.
-        # It cannot be commented out because it's an abstract method
-        # of DenseState.
-        raise NotImplementedError
+        self._apply_gate(_CZ, edge)
 
     @override
     def evolve_single(self, op: Matrix, i: int) -> None:
-        """Apply a single-qubit operation.
+        """Apply a single-qubit gate.
 
         Parameters
         ----------
-        op : numpy.ndarray
-            2*2 matrix
+        op : np.ndarray
+            2x2 unitary matrix.
         i : int
-            qubit index
+            Target qubit index.
         """
-        # TODO
-        raise NotImplementedError
+        self._apply_gate(np.asarray(op, dtype=np.complex128), (i,))
+
+    @override
+    def evolve(self, op: Matrix, qargs: Sequence[int]) -> None:
+        """Apply a multi-qubit gate.
+
+        Parameters
+        ----------
+        op : np.ndarray
+            ``2**k X 2**k`` matrix for a k-qubit gate.
+        qargs : sequence of int
+            Target qubit indices.
+        """
+        self._apply_gate(np.asarray(op, dtype=np.complex128), tuple(qargs))
 
     @override
     def expectation_single(self, op: Matrix, loc: int) -> complex:
-        """Return the expectation value of single-qubit operator.
+        r"""Return the expectation value of a single-qubit observable.
+
+        Computes :math:`\langle\psi|O|\psi\rangle`.
 
         Parameters
         ----------
-        op : numpy.ndarray
-            2*2 operator
+        op : np.ndarray
+            2X2 Hermitian operator.
         loc : int
-            target qubit index
+            Target qubit index.
 
         Returns
         -------
-        complex : expectation value.
+        complex
+            Expectation value.
         """
-        # TODO
-        raise NotImplementedError
+        n = self._nqubit
+        psi_flat = self.psi[: 1 << n]
+        op_gpu = cp.asarray(np.asarray(op, dtype=np.complex128))
+
+        psi_op = cp.tensordot(op_gpu, psi_flat.reshape([2] * n), axes=([1], [loc]))
+        psi_op = cp.moveaxis(psi_op, 0, loc).ravel()
+
+        result = cp.dot(psi_flat.conj(), psi_op)
+        if _GPU:
+            return complex(result.item())
+        return complex(result)
 
     @override
     def remove_qubit(self, qarg: int) -> None:
-        r"""Remove a separable qubit from the system and assemble a statevector for remaining qubits.
+        r"""Remove a separable qubit after measurement.
 
-        This results in the same result as partial trace, if the qubit *qarg* is separable from the rest.
-
-        For a statevector :math:`\ket{\psi} = \sum c_i \ket{i}` with sum taken over
-        :math:`i \in [ 0 \dots 00,\ 0\dots 01,\ \dots,\
-        1 \dots 11 ]`, this method returns
-
-        .. math::
-            \begin{align}
-                \ket{\psi}' =&
-                    c_{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k}}0_{\mathrm{k+1}} \dots 00}
-                    \ket{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k+1}} \dots 00} \\
-                    & + c_{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k}}0_{\mathrm{k+1}} \dots 01}
-                    \ket{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k+1}} \dots 01} \\
-                    & + c_{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k}}0_{\mathrm{k+1}} \dots 10}
-                    \ket{0 \dots 0_{\mathrm{k-1}}0_{\mathrm{k+1}} \dots 10} \\
-                    & + \dots \\
-                    & + c_{1 \dots 1_{\mathrm{k-1}}0_{\mathrm{k}}1_{\mathrm{k+1}} \dots 11}
-                    \ket{1 \dots 1_{\mathrm{k-1}}1_{\mathrm{k+1}} \dots 11},
-           \end{align}
-
-        (after normalization) for :math:`k =` qarg. If the :math:`k` th qubit is in :math:`\ket{1}` state,
-        above will return zero amplitudes; in such a case the returned state will be the one above with
-        :math:`0_{\mathrm{k}}` replaced with :math:`1_{\mathrm{k}}` .
-
-        .. warning::
-            This method assumes the qubit with index *qarg* to be separable from the rest,
-            and is implemented as a significantly faster alternative for partial trace to
-            be used after single-qubit measurements.
-            Care needs to be taken when using this method.
-            Checks for separability will be implemented soon as an option.
+        Scans the |0⟩ then |1⟩ branch of qubit ``qarg`` and keeps the
+        non-zero-norm one, normalising the result.
 
         Parameters
         ----------
         qarg : int
-            qubit index
+            Qubit index to remove.
+
+        Raises
+        ------
+        ValueError
+            If both branches have zero norm — qubit is not separable.
         """
-        # TODO
-        raise NotImplementedError
+        n = self._nqubit
+        psi_t = self.psi[: 1 << n].reshape([2] * n)
+        idx: list[int | slice] = [slice(None)] * n
+
+        for val in (0, 1):
+            idx[qarg] = val
+            branch = psi_t[tuple(idx)].ravel()
+            nrm2 = float(cp.sum(cp.abs(branch) ** 2))
+            if not math.isclose(nrm2, 0.0, abs_tol=1e-15):
+                self._nqubit -= 1
+                self.psi[: 1 << self._nqubit] = branch / math.sqrt(nrm2)
+                self.psi[1 << self._nqubit :] = 0.0
+                return
+
+        msg = f"Both branches of qubit {qarg} have zero norm — qubit may not be separable."
+        raise ValueError(msg)
 
     @override
     def swap(self, qubits: tuple[int, int]) -> None:
-        """Swap qubits.
+        """Swap two qubits.
 
         Parameters
         ----------
         qubits : tuple of int
-            (control, target) qubit indices
+            ``(qubit_a, qubit_b)`` indices.
         """
-        # TODO
-        raise NotImplementedError
-
-    def tensor(self, other: Statevec) -> None:
-        r"""Tensor product state with other qubits.
-
-        Results in ``self`` :math:`\otimes` ``other``.
-
-        Parameters
-        ----------
-        other : :class:`graphix.sim.statevec.Statevec`
-            Statevector to be tensored with ``self``.
-        """
-        # TODO
-        raise NotImplementedError
+        self._apply_gate(_SWAP, qubits)
 
 
 @dataclass(frozen=True)
 class StatevectorBackend(DenseStateBackend[Statevec]):
-    """MBQC state vector backend simulator."""
+    """MBQC state vector backend using GPU acceleration via CuPy."""
 
     state: Statevec = dataclasses.field(init=False, default_factory=lambda: Statevec(nqubit=0))

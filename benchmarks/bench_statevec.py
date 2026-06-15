@@ -7,7 +7,7 @@ import pytest
 from graphix.clifford import Clifford
 from graphix.states import BasicStates
 
-from graphix_statevec_template import Statevec
+from graphix_statevec_template import Statevec, _gpu_available
 
 if TYPE_CHECKING:
     from pytest_benchmark import BenchmarkFixture
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 nqubits = (4, 16)
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 class BenchTest:
     group = "bench_statevec"
 
