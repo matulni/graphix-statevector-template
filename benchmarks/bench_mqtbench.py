@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING
 import pytest
 from graphix_mqtbench import Benchmark, BenchmarkName, BenchmarkRunner, OptimizationPass
 
-from graphix_statevec_template import StatevectorBackend
+from graphix_statevec_template import StatevectorBackend, _gpu_available
 
 if TYPE_CHECKING:
     from pytest_benchmark import BenchmarkFixture
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 class BenchTest:
     _BENCHMARKS = (
         Benchmark(BenchmarkName.FULL_ADDER, 16),

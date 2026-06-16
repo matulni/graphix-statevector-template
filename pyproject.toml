@@ -34,6 +34,9 @@ graphix = { git = "https://github.com/TeamGraphix/graphix.git", rev = "master" }
 graphix-statevec-template = "graphix_statevec_template:main"
 
 [project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x[ctk]>=13.0",
+]
 typing = [
     "qiskit==2.3.1",
 ]
