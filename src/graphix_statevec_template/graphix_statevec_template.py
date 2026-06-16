@@ -19,13 +19,12 @@ if TYPE_CHECKING:
     from graphix.sim.data import Data
 
 try:
-    import cupy as cp  # type: ignore[import-not-found]
-
-    cp.cuda.Device(0).compute_capability  # noqa: B018
+    import cupy as _cupy
+    _cupy.cuda.Device(0).compute_capability  # type: ignore[attr-defined]  # noqa: B018
+    cp: Any = _cupy
     _GPU: bool = True
 except Exception:  # noqa: BLE001
-    import numpy as cp  # noqa: ICN001
-
+    cp = np
     _GPU = False
 
 
