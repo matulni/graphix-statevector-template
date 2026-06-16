@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 try:
     import cupy as _cupy
+
     _cupy.cuda.Device(0).compute_capability  # type: ignore[attr-defined]  # noqa: B018
     cp: Any = _cupy
     _GPU: bool = True
