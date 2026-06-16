@@ -28,7 +28,7 @@ dev = [
 
 [tool.uv.sources]
 graphix-mqtbench = { git = "https://github.com/matulni/graphix-mqtbench.git", rev = "main" }
-graphix = { git = "https://github.com/TeamGraphix/graphix.git", rev = "master" }
+graphix = { git = "https://github.com/TeamGraphix/graphix.git" }
 
 [project.scripts]
 graphix-statevec-template = "graphix_statevec_template:main"
