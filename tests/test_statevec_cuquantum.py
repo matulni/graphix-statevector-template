@@ -1,3 +1,5 @@
+"""Tests for the cuQuantum-accelerated GPU statevector backend."""
+
 from __future__ import annotations
 
 import math
@@ -8,12 +10,25 @@ import numpy.typing as npt
 import pytest
 from graphix.clifford import Clifford
 from graphix.random_objects import rand_circuit
-from graphix.sim.statevec import Statevec as SVLegacy
-from graphix.sim.statevec import StatevectorBackend as SBLegacy
+from graphix.sim.statevec import Statevec as StatevecCPU
+from graphix.sim.statevec import StatevectorBackend as StatevectorBackendCPU
 from graphix.states import BasicStates
 from numpy.random import Generator
 
-from graphix_statevec_template import Statevec, StatevectorBackend
+from graphix_statevec_cuquantum import Statevec, StatevectorBackend
+
+
+def _gpu_available() -> bool:
+    """Check if a CUDA GPU is available for testing."""
+    try:
+        import cupy as cp  # noqa: PLC0415
+
+        cp.zeros(1)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return False
+    else:
+        return True
+
 
 if TYPE_CHECKING:
     from graphix.states import State
@@ -27,8 +42,10 @@ def generate_rnd_data(rng: Generator, nqubits: int) -> npt.NDArray[np.complex128
     return data
 
 
-@pytest.mark.skip(reason="Not Implemented")
-class TestStatevec:
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
+class TestStatevecCuQuantum:
+    """Self-contained unit tests for the cuQuantum statevector."""
+
     N_JUMPS = 3
 
     @pytest.mark.parametrize(
@@ -141,7 +158,6 @@ class TestStatevec:
             (Statevec(data=[BasicStates.PLUS, BasicStates.PLUS]), 1, Statevec(data=BasicStates.PLUS, nqubit=1)),
             (Statevec(data=[BasicStates.PLUS, BasicStates.MINUS]), 0, Statevec(data=BasicStates.MINUS, nqubit=1)),
             (Statevec(data=[BasicStates.ZERO, BasicStates.ONE]), 0, Statevec(data=BasicStates.ONE, nqubit=1)),
-            # In previous testcase, branch 1 is 0 (psi_10 == psi_11 == 0), and first element of branch 0 is 0 too (psi_00 == 0)!
             (
                 Statevec(data=[BasicStates.PLUS_I, BasicStates.ONE, BasicStates.PLUS]),
                 1,
@@ -149,14 +165,16 @@ class TestStatevec:
             ),
         ],
     )
+    # In previous testcase, branch 1 is 0 (psi_10 == psi_11 == 0), and first element
+    # of branch 0 is 0 too (psi_00 == 0)!
     def test_remove_qubit(self, sv: Statevec, q: int, sv_ref: Statevec) -> None:
         sv.remove_qubit(q)
         assert np.allclose(sv.flatten(), sv_ref.flatten())
 
 
-@pytest.mark.skip(reason="Not Implemented")
-class TestStatevecLegacy:
-    """Tests in this class compare the result against the existing statevector simulator in Graphix. They are not self-contained."""
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
+class TestStatevecCPU:
+    """Compare cuQuantum backend results against the reference NumPy statevector."""
 
     N_JUMPS = 3
 
@@ -165,40 +183,40 @@ class TestStatevecLegacy:
         rng = Generator(fx_bg.jumped(jumps))
         nqubits = 5
         sv_test = Statevec(generate_rnd_data(rng, nqubits))
-        sv_ref = SVLegacy(data=sv_test.flatten())
+        sv_ref = StatevecCPU(data=sv_test.flatten())
         edge: tuple[int, int] = tuple(rng.choice(range(nqubits), size=2, replace=False))
         for sv in [sv_test, sv_ref]:
             sv.entangle(edge)
 
-        assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
+        assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))
 
     @pytest.mark.parametrize("jumps", range(1, N_JUMPS))
     def test_swap(self, fx_bg: PCG64, jumps: int) -> None:
         rng = Generator(fx_bg.jumped(jumps))
         nqubits = 5
         sv_test = Statevec(generate_rnd_data(rng, nqubits))
-        sv_ref = SVLegacy(data=sv_test.flatten())
+        sv_ref = StatevecCPU(data=sv_test.flatten())
         edge: tuple[int, int] = tuple(rng.choice(range(nqubits), size=2, replace=False))
         for sv in [sv_test, sv_ref]:
             sv.swap(edge)
 
-        assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
+        assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))
 
     def test_evolve_single(self, fx_rng: Generator) -> None:
         nqubits = 5
         for clifford in Clifford:
             sv_test = Statevec(generate_rnd_data(fx_rng, nqubits))
-            sv_ref = SVLegacy(data=sv_test.flatten())
+            sv_ref = StatevecCPU(data=sv_test.flatten())
             qubit = int(fx_rng.integers(0, nqubits))
             for sv in [sv_test, sv_ref]:
                 sv.evolve_single(clifford.matrix, qubit)
-            assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
+            assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))
 
     def test_expectation_single(self, fx_rng: Generator) -> None:
         nqubits = 5
         for clifford in Clifford:
             sv_test = Statevec(generate_rnd_data(fx_rng, nqubits))
-            sv_ref = SVLegacy(data=sv_test.flatten())
+            sv_ref = StatevecCPU(data=sv_test.flatten())
             qubit = int(fx_rng.integers(0, nqubits))
 
             val_test = sv_test.expectation_single(clifford.matrix, qubit)
@@ -208,26 +226,25 @@ class TestStatevecLegacy:
             assert math.isclose(val_test.imag, val_ref.imag, abs_tol=1e-12)
 
     def test_add_nodes(self, fx_rng: Generator) -> None:
-
         max_qubits = 5
         sv_test = Statevec(nqubit=0)
-        sv_ref = SVLegacy(nqubit=0)
+        sv_ref = StatevecCPU(nqubit=0)
 
         for _ in range(max_qubits):  # Add a node at each iteration
             data = generate_rnd_data(fx_rng, nqubits=1)
             sv_test.add_nodes(1, data)
             sv_ref.add_nodes(1, data)
 
-            assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
+            assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))
 
     @pytest.mark.parametrize(
-        "projector", [np.array([[1, 0], [0, 0]], dtype=np.complex128), np.array([[0, 0], [0, 1]], dtype=np.complex128)]
+        "projector",
+        [np.array([[1, 0], [0, 0]], dtype=np.complex128), np.array([[0, 0], [0, 1]], dtype=np.complex128)],
     )
     def test_remove_nodes(self, fx_rng: Generator, projector: npt.NDArray[np.complex128]) -> None:
-
         nqubits = 5
         sv_test = Statevec(generate_rnd_data(fx_rng, nqubits))
-        sv_ref = SVLegacy(data=sv_test.flatten())
+        sv_ref = StatevecCPU(data=sv_test.flatten())
         q = 0
         for _ in range(nqubits - 1):  # Remove a node at each iteration
             sv_test.evolve_single(projector, q)
@@ -235,12 +252,13 @@ class TestStatevecLegacy:
             sv_ref.evolve_single(projector, q)
             sv_ref.remove_qubit(q)
 
-            assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
+            assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))
 
 
-@pytest.mark.skip(reason="Not Implemented")
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
 @pytest.mark.parametrize("jumps", range(1, 6))
 def test_pattern_simulator(fx_bg: PCG64, jumps: int) -> None:
+    """End-to-end pattern simulation with the cuQuantum backend."""
     rng = Generator(fx_bg.jumped(jumps))
 
     nqubits = 5
@@ -248,26 +266,9 @@ def test_pattern_simulator(fx_bg: PCG64, jumps: int) -> None:
     pattern = rand_circuit(nqubits, depth=5, rng=rng).transpile().pattern
     pattern.remove_pauli_measurements()
 
-    sv_test = pattern.simulate_pattern(backend=StatevectorBackend(), rng=rng)
-    sv_ref = pattern.simulate_pattern(backend=SBLegacy(), rng=rng)
+    sv_test = pattern.simulate_pattern(
+        backend=StatevectorBackend.with_capacity(max_qubits=pattern.max_space()), rng=rng
+    )
+    sv_ref = pattern.simulate_pattern(backend=StatevectorBackendCPU(), rng=rng)
 
-    assert sv_ref.isclose(SVLegacy(data=sv_test.flatten()))
-
-
-# # @pytest.mark.skip(reason="debug")
-# @pytest.mark.parametrize("test_case", generate_benchmark_list(nqubits=2))
-# @pytest.mark.benchmark(max_time=0.01, min_rounds=1, warmup=False)
-# def test_mqtbench_simulation(test_case: Benchmark, benchmark: BenchmarkFixture) -> None:
-#     sv_ref = test_case.to_circuit().simulate_statevector().statevec
-
-#     optim_pass = OptimizationPass.M
-#     runner = BenchmarkRunner(
-#         benchmark=test_case,
-#         benchmark_fixture=benchmark,
-#         optim=optim_pass,
-#         backend_generator=lambda p: StatevectorBackend(state=Statevec(nqubit=0, max_space=p.max_space())),
-#         backend_name="test",
-#     )
-#     sv = runner.run()  # type: ignore[no-untyped-call] # TODO: annotate graphix-mqtbenchs
-
-#     assert sv_ref.isclose(sv)
+    assert sv_ref.isclose(StatevecCPU(data=sv_test.flatten()))

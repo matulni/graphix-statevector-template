@@ -12,6 +12,15 @@ dependencies = [
     "graphix-mqtbench>=0.1.0",
 ]
 
+[project.optional-dependencies]
+cuquantum = [
+    "cupy-cuda12x>=13.0",
+    "cuquantum-python-cu12>=24.3",
+]
+typing = [
+    "qiskit==2.3.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]
 build-backend = "uv_build"
@@ -30,13 +39,12 @@ dev = [
 graphix-mqtbench = { git = "https://github.com/matulni/graphix-mqtbench.git", rev = "main" }
 graphix = { git = "https://github.com/TeamGraphix/graphix.git", rev = "master" }
 
-[project.scripts]
-graphix-statevec-template = "graphix_statevec_template:main"
+[tool.uv.build-backend]
+module-name = "graphix_statevec_cuquantum"
+source-dir = "src"
 
-[project.optional-dependencies]
-typing = [
-    "qiskit==2.3.1",
-]
+[project.scripts]
+graphix-statevec-template = "graphix_statevec_cuquantum:main"
 
 [tool.ruff]
 line-length = 120
@@ -135,7 +143,7 @@ include = ["**/*.py"]
 exclude = [
   "__init__.py",
   "*.ipynb",
-  "**/__pycache__", 
+  "**/__pycache__",
   "**/.*",
   "**/node_modules"]
 reportUnknownArgumentType = "information"

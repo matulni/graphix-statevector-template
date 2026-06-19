@@ -1,34 +1,55 @@
+"""Benchmarks for the cuQuantum GPU statevector backend."""
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import cupy as _cp
 import numpy as np
 import pytest
 from graphix.clifford import Clifford
 from graphix.states import BasicStates
 
-from graphix_statevec_template import Statevec
+from graphix_statevec_cuquantum import Statevec
+
+cp: Any = _cp
+
+
+def _gpu_available() -> bool:
+    try:
+        import cupy as cp  # noqa: PLC0415
+
+        cp.zeros(1)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return False
+    else:
+        return True
+
 
 if TYPE_CHECKING:
     from pytest_benchmark import BenchmarkFixture
 
 
-nqubits = (4, 16)
+nqubits = (4, 8, 12, 16)
 
 
-@pytest.mark.skip(reason="Not Implemented")
-class BenchTest:
-    group = "bench_statevec"
+@pytest.mark.skipif(not _gpu_available(), reason="GPU not available")
+class BenchCuQuantum:
+    """cuQuantum GPU backend benchmarks."""
+
+    group = "bench_cuquantum"
 
     @pytest.mark.benchmark(group=group, max_time=1)
     @pytest.mark.parametrize("nqubit", nqubits)
     def bench_expectation_single(self, benchmark: BenchmarkFixture, nqubit: int) -> None:
         sv = Statevec(nqubit=nqubit, data=BasicStates.ZERO)
         op = Clifford.H.matrix
-        q = nqubit - 1  # Apply gate on last qubit
+        q = nqubit - 1
 
         def run() -> complex:
-            return sv.expectation_single(op, q)
+            result = sv.expectation_single(op, q)
+            cp.cuda.Device().synchronize()
+            return result
 
         assert benchmark(run) == pytest.approx(1 / np.sqrt(2))
 
@@ -37,23 +58,21 @@ class BenchTest:
     def bench_evolve_single(self, benchmark: BenchmarkFixture, nqubit: int) -> None:
         sv = Statevec(nqubit=nqubit, data=BasicStates.ZERO)
         op = Clifford.H.matrix
-        q = nqubit - 1  # Apply gate on last qubit
-
-        # Since `sv` is modified in-place, the output of `benchmark(run)` will depend on the number of benchmark iterations which is automatically calculated by pytest-benchmark. To test the output we would need to initialize a fresh `Statevec` before each benchmark iteration. Using benchmark.pedantic with a setup function does not allow to have more than 1 benchmark iterations (as of version 5.2.3), which leads to unreliable results for small instances. A possible solution is to instantiate a fresh `Statevec` inside the `run` function, but here we choose not do it to have a more faithful benchmark of `evolve_single`
+        q = nqubit - 1
 
         def run() -> None:
             sv.evolve_single(op, q)
+            cp.cuda.Device().synchronize()
 
         benchmark(run)
 
     @pytest.mark.benchmark(group=group, max_time=1)
     @pytest.mark.parametrize("nqubit", nqubits)
     def bench_add_nodes(self, benchmark: BenchmarkFixture, nqubit: int) -> None:
-
         def run() -> Statevec:
-            # Here we have to initialize a fresh statevector before each iteration, otherwise the statevector becomes of size 2**(number_of_iterations)
             sv = Statevec(nqubit=nqubit, data=BasicStates.ZERO)
             sv.add_nodes(nqubit=1, data=BasicStates.PLUS)
+            cp.cuda.Device().synchronize()
             return sv
 
         sv = benchmark(run)
@@ -63,11 +82,10 @@ class BenchTest:
     @pytest.mark.benchmark(group=group, max_time=1)
     @pytest.mark.parametrize("nqubit", nqubits)
     def bench_remove_qubit(self, benchmark: BenchmarkFixture, nqubit: int) -> None:
-
         def run() -> Statevec:
-            # Here we have to initialize a fresh statevector before each iteration, otherwise the statevector does not have a constant number of qubits.
             sv = Statevec(nqubit=nqubit, data=BasicStates.PLUS)
-            sv.remove_qubit(nqubit - 1)  # We remove last qubit
+            sv.remove_qubit(nqubit - 1)
+            cp.cuda.Device().synchronize()
             return sv
 
         sv = benchmark(run)
@@ -81,5 +99,6 @@ class BenchTest:
 
         def run() -> None:
             sv.entangle((0, nqubit - 1))
+            cp.cuda.Device().synchronize()
 
         benchmark(run)
